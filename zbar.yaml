@@ -1,0 +1,60 @@
+package:
+  name: zbar
+  version: 0.23.93
+  epoch: 0
+  description: "ZBar is a software suite for reading barcodes from various sources"
+  copyright:
+    - license: LGPL-2.0-or-later
+  dependencies:
+    runtime:
+      - ImageMagick
+      - libpng
+      - pango
+      - glibc
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - cmake
+      - libjpeg-turbo-dev
+      - libtool
+      - pkgconf
+      - gettext
+      - gettext-dev
+      - autoconf
+      - automake
+      - m4
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/mchehab/zbar/archive/refs/tags/${{package.version}}.tar.gz
+      expected-sha256: 212dfab527894b8bcbcc7cd1d43d63f5604a07473d31a5f02889e372614ebe28
+
+  - uses: autoconf/configure
+    with:
+      opts:
+        - --enable-nls          # Enable translations (from Makefile.am)
+        - --with-gtk            # Enable GTK support if needed
+        - --with-python         # Include Python bindings
+        - --with-qt             # Include Qt support
+
+  - uses: autoconf/make
+  
+  - uses: autoconf/make-install
+    with:
+      opts: DESTDIR=${{targets.destdir}}
+
+  - uses: strip
+
+subpackages:
+  - name: zbar-dev
+    description: "Development files for ZBar"
+    pipeline:
+      - uses: split/dev
+
+update:
+  enabled: true
+  github:
+    identifier: 13689
