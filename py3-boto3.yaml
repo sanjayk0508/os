@@ -1,6 +1,6 @@
 package:
   name: py3-boto3
-  version: 1.35.81
+  version: 1.35.90
   epoch: 0
   description: The AWS SDK for Python
   copyright:
@@ -28,7 +28,7 @@ environment:
 pipeline:
   - uses: fetch
     with:
-      expected-sha256: d2e95fa06f095b8e0c545dd678c6269d253809b2997c30f5ce8a956c410b4e86
+      expected-sha256: dc56caaaab2157a4bfc109c88b50cd032f3ac66c06d17f8ee335b798eaf53e5c
       uri: https://files.pythonhosted.org/packages/source/b/boto3/boto3-${{package.version}}.tar.gz
 
 subpackages:
