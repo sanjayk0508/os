@@ -1,0 +1,62 @@
+package:
+  name: process-exporter
+  version: "0.8.7"
+  epoch: 0
+  description: Prometheus exporter that mines /proc to report on selected processes
+  copyright:
+    - license: MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ncabatoff/process-exporter
+      tag: v${{package.version}}
+      expected-commit: e52ab0a1c03d6baf8ed60154c254ecc0008549f3
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      packages: ./cmd/process-exporter
+      output: process-exporter
+      ldflags: |
+        -X main.version=v${{package.version}}
+        -X main.buildHash=$(git rev-parse HEAD)
+        -X main.buildDate=$(date -u -d "@$SOURCE_DATE_EPOCH" +'%Y-%m-%dT%H:%M:%SZ')
+
+update:
+  enabled: true
+  github:
+    identifier: ncabatoff/process-exporter
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - runs: |
+        process-exporter --version | grep ${{package.version}}
+        process-exporter --help
+    - name: "Test process-exporter daemon functionality"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > /tmp/process-exporter.yml << 'EOF'
+          process_names:
+            - name: "{{.Comm}}"
+              cmdline:
+              - '.+'
+          EOF
+        start: process-exporter -config.path /tmp/process-exporter.yml
+        timeout: 30
+        expected_output: |
+          Listening on
+        post: |
+          # Verify metrics endpoint is accessible and contains expected metrics
+          curl -sf http://localhost:9256/metrics | grep -q 'namedprocess_namegroup_num_procs' || exit 1
+          curl -sf http://localhost:9256/metrics | grep -q 'process_exporter_build_info' || exit 1
