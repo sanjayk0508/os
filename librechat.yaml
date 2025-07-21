@@ -1,0 +1,116 @@
+package:
+  name: librechat
+  version: "0.7.8"
+  epoch: 0
+  description: "LibreChat - Open-source chatbot UI for multiple AI providers"
+  copyright:
+    - license: "MIT"
+  options:
+    # Don't depend on external libraries included in virtual environments
+    no-depends: true
+    # Don't resolve libraries installed in virtual environments as providers
+    no-provides: true
+  dependencies:
+    runtime:
+      - busybox
+      - dumb-init
+      - jemalloc
+      - nodejs-20
+      - py3-pip
+      - python-3.12
+      - tzdata
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - coreutils
+      - dumb-init
+      - file
+      - git
+      - jemalloc
+      - jq
+      - libcrypto3
+      - nodejs-20
+      - npm
+      - openssl-dev
+      - py3-pip
+      - python-3.12
+  environment:
+    NODE_OPTIONS: "--max-old-space-size=2048"
+    NEXT_TELEMETRY_DISABLED: "1"
+    NEXT_SHARP_PATH: "/usr/bin/sharp"
+    NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    HOST: "0.0.0.0"
+    PORT: "3080"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/danny-avila/LibreChat.git
+      tag: v${{package.version}}
+      expected-commit: f7777a2723e8e51f3ff464d4e672db46905964a5
+
+  - name: "Install dependencies and build"
+    runs: |
+      npm ci --no-audit --fund false
+      npm run frontend
+      npm prune --production
+
+  - name: "Move app output into destination directory"
+    runs: |
+      # Create the app directory
+      mkdir -p "${{targets.destdir}}"/app/
+
+      # Copy files to a temporary location first to avoid self-copy issues
+      cp -r . /tmp/librechat-temp/
+
+      # Move from temp to final location
+      mv /tmp/librechat-temp/* "${{targets.destdir}}"/app/
+      mv /tmp/librechat-temp/.* "${{targets.destdir}}"/app/ 2>/dev/null || true
+
+      # Clean up temp directory
+      rmdir /tmp/librechat-temp
+
+      # Create necessary directories for runtime
+      mkdir -p "${{targets.destdir}}"/app/api/logs
+      mkdir -p "${{targets.destdir}}"/app/api/data
+      mkdir -p "${{targets.destdir}}"/app/uploads
+
+      # Remove unnecessary files to reduce package size
+      rm -rf "${{targets.destdir}}"/app/.git
+      rm -rf "${{targets.destdir}}"/app/node_modules/.cache
+
+      # Install entry point script
+      cat > "${{targets.destdir}}"/app/entrypoint.sh << 'EOF'
+      #!/bin/sh
+      exec dumb-init -- node api/server/index.js
+      EOF
+      chmod +x "${{targets.destdir}}"/app/entrypoint.sh
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - nodejs-20
+        - ca-certificates-bundle
+        - wolfi-base
+  pipeline:
+    - name: "Core binary check"
+      runs: |
+        # Verify essential files exist and are executable
+        test -d /app
+        test -f /app/entrypoint.sh
+        test -x /app/entrypoint.sh
+        test -f /app/api/server/index.js
+        test -d /app/node_modules
+
+update:
+  enabled: true
+  schedule:
+    period: weekly
+    reason: LibreChat regularly releases updates with new features and bug fixes.
+  git:
+    strip-prefix: v
