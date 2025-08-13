@@ -41,7 +41,7 @@ output "config" {
     volumes = [
       "/var/spool/postfix",
       "/etc/postfix",
-      "/etc/rspamd"
+      "/etc/rspamd/dkim"
     ]
     paths = [
       {
@@ -70,6 +70,14 @@ output "config" {
       },
       {
         path        = "/etc/rspamd"
+        type        = "directory"
+        uid         = 0
+        gid         = 0
+        permissions = 755
+        recursive   = true
+      },
+      {
+        path        = "/etc/rspamd/dkim"
         type        = "directory"
         uid         = 0
         gid         = 0

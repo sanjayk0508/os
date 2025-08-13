@@ -27,7 +27,7 @@ package:
       - wolfi-baselayout
       - rsyslog
       - postfix-scripts
-      - postfix-config
+      - postfix-rspamd-config
 
 environment:
   contents:
@@ -138,7 +138,6 @@ pipeline:
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/defaults
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/readme
       mkdir -p "${{targets.contextdir}}"/usr/share/licenses/postfix
-      # Note: Directories for scripts and configs are created by subpackages
 
 
       # compile
@@ -245,6 +244,8 @@ subpackages:
         - netcat-openbsd
         - cronie
         - bash
+        - grep
+        - coreutils
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/scripts
@@ -274,6 +275,25 @@ subpackages:
           # Setup postfix
           postfix set-permissions > /dev/null 2>&1 || true
           postmap lmdb:/etc/postfix/aliases
+          
+          # Configure rspamd integration for DKIM
+          mkdir -p /etc/rspamd/local.d
+          
+          if [ ! -f /etc/rspamd/local.d/dkim_signing.conf ]; then
+            cat > /etc/rspamd/local.d/dkim_signing.conf << 'DKIM_CONF'
+          # DKIM signing configuration
+          path = "/etc/rspamd/dkim/$domain.$selector.key";
+          selector = "mail";
+          allow_username_mismatch = true;
+          use_domain = "header";
+          use_esld = true;
+          sign_local = true;
+          sign_authenticated = true;
+          DKIM_CONF
+          fi
+          
+          # Ensure directories exist for DKIM keys
+          mkdir -p /etc/rspamd/dkim
           
           # Start services via supervisord
           exec supervisord -c /etc/supervisord.conf
@@ -310,108 +330,171 @@ subpackages:
           
           chmod +x "${{targets.subpkgdir}}"/scripts/*.sh
 
-  - name: postfix-config
-    description: Postfix configuration files
+  # Note: postfix-config subpackage removed to avoid file conflicts
+  # - The supervisor package already provides /etc/supervisord.conf
+  # - The rsyslog package already provides /etc/rsyslog.conf
+  # - Only the opendkim.conf placeholder was unique to this package
+  # - To avoid conflicts, we'll rely on the official packages for these configs
+  # - name: postfix-config
+  #   description: Postfix configuration files
+  #   dependencies:
+  #     runtime:
+  #       - merged-usrsbin
+  #       - wolfi-baselayout
+  #       - bash
+  #       - supervisor
+  #       - rsyslog
+  #       - postfix
+  #       - cronie
+  #       - netcat-openbsd
+  #       - grep
+  #       - sed
+  #       - coreutils
+  #       - procps
+  #       - shadow
+  #       - findutils
+  #       - busybox
+  #       - ca-certificates-bundle
+  #       - tzdata
+  #       - glibc-locales
+  #       - libgcc
+  #   pipeline:
+  #     - runs: |
+  #         mkdir -p "${{targets.subpkgdir}}"/etc
+  #         mkdir -p "${{targets.subpkgdir}}"/etc/opendkim
+          
+  #         # Create supervisord.conf
+  #         cat > "${{targets.subpkgdir}}"/etc/supervisord.conf << 'EOF'
+  #         [supervisord]
+  #         user            = root
+  #         nodaemon        = true
+  #         logfile         = /dev/null
+  #         logfile_maxbytes= 0
+          
+  #         [program:rsyslog]
+  #         command         = rsyslogd -n
+  #         autostart       = true
+  #         autorestart     = true
+  #         startsecs       = 2
+  #         stopwaitsecs    = 2
+  #         stdout_logfile  = /dev/stdout
+  #         stderr_logfile  = /dev/stderr
+  #         stdout_logfile_maxbytes = 0
+  #         stderr_logfile_maxbytes = 0
+          
+  #         [program:postfix]
+  #         command         = /scripts/postfix.sh
+  #         autostart       = true
+  #         autorestart     = false
+  #         directory       = /etc/postfix
+  #         startsecs       = 0
+          
+  #         [program:cron]
+  #         command         = /scripts/cron.sh
+  #         autostart       = true
+  #         autorestart     = true
+  #         startsecs       = 0
+  #         EOF
+          
+  #         # Create rsyslog.conf
+  #         cat > "${{targets.subpkgdir}}"/etc/rsyslog.conf << 'EOF'
+  #         $ModLoad immark.so   # provides --MARK-- message capability
+  #         $ModLoad imuxsock.so # provides support for local system logging
+          
+  #         # default permissions for all log files.
+  #         $FileOwner root
+  #         $FileGroup adm
+  #         $FileCreateMode 0640
+  #         $DirCreateMode 0755
+  #         $Umask 0022
+          
+  #         template(name="devicelog" type="string" string="/dev/stdout")
+          
+  #         template(name="plain" type="list") {
+  #             property(name="timereported" dateFormat="rfc3339")
+  #             constant(value=" ")
+  #             property(name="syslogseverity-text" caseconversion="upper" fixedwidth="on" position.to="7")
+  #             constant(value=" ")
+  #             property(name="syslogtag")
+  #             property(name="msg" spifno1stsp="on")
+  #             property(name="msg" droplastlf="on")
+  #             constant(value="\n")
+  #         }
+          
+  #         if $syslogseverity <= '6' then {
+  #             # Do not log healthchecks
+  #             if ($msg contains_i "connect from localhost[127.0.0.1]") then { stop }
+  #             if ($msg contains_i "lost connection after EHLO from localhost[127.0.0.1]") then { stop }
+  #             if ($msg contains_i "disconnect from localhost[127.0.0.1] ehlo=1 commands=1") then { stop }
+  #         }
+          
+  #         action(name="stdout" type="omfile" DynaFile="devicelog" template="plain" DirCreateMode="0755" FileCreateMode="0644")
+  #         EOF
+          
+  #         # Create opendkim.conf (using rspamd instead)
+  #         cat > "${{targets.subpkgdir}}"/etc/opendkim/opendkim.conf << 'EOF'
+  #         # OpenDKIM configuration (using rspamd instead)
+  #         # This file is kept for compatibility with upstream
+  #         # Rspamd handles DKIM signing and verification
+  #         EOF
+
+  - name: postfix-rspamd-config
+    description: Rspamd configuration for Postfix DKIM signing
     dependencies:
       runtime:
         - merged-usrsbin
         - wolfi-baselayout
+        - rspamd
         - bash
-        - supervisor
-        - rsyslog
-        - postfix
-        - cronie
-        - netcat-openbsd
-        - grep
-        - sed
-        - coreutils
-        - procps
-        - shadow
-        - findutils
-        - busybox
-        - ca-certificates-bundle
-        - tzdata
-        - glibc-locales
-        - libc6
-        - libgcc
     pipeline:
       - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/etc
           mkdir -p "${{targets.subpkgdir}}"/etc/opendkim
+          mkdir -p "${{targets.subpkgdir}}"/etc/rspamd/local.d
           
-          # Create supervisord.conf
-          cat > "${{targets.subpkgdir}}"/etc/supervisord.conf << 'EOF'
-          [supervisord]
-          user            = root
-          nodaemon        = true
-          logfile         = /dev/null
-          logfile_maxbytes= 0
-          
-          [program:rsyslog]
-          command         = rsyslogd -n
-          autostart       = true
-          autorestart     = true
-          startsecs       = 2
-          stopwaitsecs    = 2
-          stdout_logfile  = /dev/stdout
-          stderr_logfile  = /dev/stderr
-          stdout_logfile_maxbytes = 0
-          stderr_logfile_maxbytes = 0
-          
-          [program:postfix]
-          command         = /scripts/postfix.sh
-          autostart       = true
-          autorestart     = false
-          directory       = /etc/postfix
-          startsecs       = 0
-          
-          [program:cron]
-          command         = /scripts/cron.sh
-          autostart       = true
-          autorestart     = true
-          startsecs       = 0
-          EOF
-          
-          # Create rsyslog.conf
-          cat > "${{targets.subpkgdir}}"/etc/rsyslog.conf << 'EOF'
-          $ModLoad immark.so   # provides --MARK-- message capability
-          $ModLoad imuxsock.so # provides support for local system logging
-          
-          # default permissions for all log files.
-          $FileOwner root
-          $FileGroup adm
-          $FileCreateMode 0640
-          $DirCreateMode 0755
-          $Umask 0022
-          
-          template(name="devicelog" type="string" string="/dev/stdout")
-          
-          template(name="plain" type="list") {
-              property(name="timereported" dateFormat="rfc3339")
-              constant(value=" ")
-              property(name="syslogseverity-text" caseconversion="upper" fixedwidth="on" position.to="7")
-              constant(value=" ")
-              property(name="syslogtag")
-              property(name="msg" spifno1stsp="on")
-              property(name="msg" droplastlf="on")
-              constant(value="\n")
-          }
-          
-          if $syslogseverity <= '6' then {
-              # Do not log healthchecks
-              if ($msg contains_i "connect from localhost[127.0.0.1]") then { stop }
-              if ($msg contains_i "lost connection after EHLO from localhost[127.0.0.1]") then { stop }
-              if ($msg contains_i "disconnect from localhost[127.0.0.1] ehlo=1 commands=1") then { stop }
-          }
-          
-          action(name="stdout" type="omfile" DynaFile="devicelog" template="plain" DirCreateMode="0755" FileCreateMode="0644")
-          EOF
-          
-          # Create opendkim.conf (using rspamd instead)
+          # Create placeholder opendkim.conf for compatibility with upstream
           cat > "${{targets.subpkgdir}}"/etc/opendkim/opendkim.conf << 'EOF'
           # OpenDKIM configuration (using rspamd instead)
           # This file is kept for compatibility with upstream
           # Rspamd handles DKIM signing and verification
+          
+          # Settings from upstream that rspamd will handle:
+          AutoRestart             Yes
+          AutoRestartRate         10/1h
+          UMask                   002
+          Syslog                  Yes
+          SyslogSuccess           Yes
+          LogWhy                  No
+          
+          Canonicalization        relaxed/simple
+          RequireSafeKeys         no
+          
+          Mode                    sv
+          SignatureAlgorithm      rsa-sha256
+          EOF
+          
+          # Create rspamd DKIM signing configuration
+          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/dkim_signing.conf << 'EOF'
+          # DKIM signing configuration for use with Postfix
+          path = "/etc/rspamd/dkim/$domain.$selector.key";
+          selector = "mail";
+          allow_username_mismatch = true;
+          use_domain = "header";
+          use_esld = true;
+          sign_local = true;
+          sign_authenticated = true;
+          EOF
+          
+          # Create milter configuration for Postfix integration
+          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/milter_headers.conf << 'EOF'
+          # Add DKIM signature using the milter protocol
+          use = ["authentication-results", "x-spam-status"];
+          authenticated_headers = ["authentication-results"];
+          EOF
+          
+          # Create worker-proxy configuration for Postfix milter
+          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/worker-proxy.inc << 'EOF'
+          bind_socket = "localhost:8891";
+          milter = true;
           EOF
 
   - range: _subpackages
