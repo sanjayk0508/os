@@ -1,36 +1,41 @@
 package:
   name: postfix
-  version: "3.10.4"
-  epoch: 0
-  description: Secure and fast drop-in replacement for Sendmail (MTA)
+  version: "4.4.0"
+  epoch: 7
+  description: Secure and fast drop-in replacement for Sendmail (MTA) with Rspamd integration
   copyright:
     - license: IPL-1.0 OR EPL-2.0
-  scriptlets:
-    pre-install: |
-      #!/bin/sh
-      addgroup -S postfix 2>/dev/null
-      addgroup -S postdrop 2>/dev/null
-      adduser -S -H -h /var/spool/postfix -G postfix -g postfix postfix 2>/dev/null
-      addgroup postfix mail 2>/dev/null
-      adduser -S -H -h /var/mail/domains -s /sbin/nologin -G postdrop -g vmail vmail 2>/dev/null
-
-      exit 0
   checks:
     disabled:
       - setuidgid
   dependencies:
     runtime:
+      - bash
+      - busybox
+      - coreutils
+      - cronie
+      - findutils
+      - glibc
+      - grep
+      - krb5-libs
       - merged-usrsbin
-      - rspamd
+      - netcat-openbsd
+      - rspamd@local
+      - rsyslog
       - sasl-xoauth2
+      - sed
+      - shadow
       - supervisor
       - wolfi-baselayout
-      - rsyslog
-      - postfix-scripts
-      - postfix-rspamd-config
 
 environment:
   contents:
+    repositories:
+      - '@local /work/packages'
+      - https://packages.wolfi.dev/os
+    keyring:
+      - local-melange.rsa.pub
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
     packages:
       - build-base
       - busybox
@@ -38,6 +43,7 @@ environment:
       - coreutils
       - cyrus-sasl-dev
       - icu-dev
+      - krb5-dev
       - libnsl-dev
       - linux-headers
       - lmdb-dev
@@ -48,8 +54,12 @@ environment:
       - pcre2-dev
       - perl
       - postgresql-dev
+      - rspamd@local
+      - rsyslog
       - sasl-xoauth2-dev
+      - shadow
       - sqlite-dev
+      - supervisor
 
 data:
   - name: _subpackages
@@ -61,30 +71,29 @@ data:
       sqlite:
 
 pipeline:
+  # Get the upstream docker-postfix repository for scripts and configs
+  - uses: git-checkout
+    with:
+      repository: https://github.com/bokysan/docker-postfix
+      tag: v${{package.version}}
+      expected-commit: 5113756b0836cc27e928040b2aa9762e820dc71b
+
+  # Get Postfix source tarball (scripts come from GitHub, but source code only available via tarball)
   - uses: fetch
     with:
-      expected-sha256: cfb66861fe8f964787ddaeab15f3ca3e7ef3de730f97171afc4a5eca338ca444
-      uri: https://de.postfix.org/ftpmirror/official/postfix-${{package.version}}.tar.gz
+      expected-sha256: e3cec05d91b6d2958ecd6ea9045faa35f79c5b0e228b975ace46ad2afe812053
+      uri: https://de.postfix.org/ftpmirror/official/postfix-3.10.3.tar.gz
 
   - runs: |
       _mvline() {
-        # Assigning arguments to variables
         local regex="$1"
         local outfile="$3.d/$2"
         local infile="$3"
-
-        # Use sed to find the line matching the regex, write it to outfile, and delete it from infile
         sed -i -E -e "\|$regex|{
       w $outfile
       d
       }" "$infile"
       }
-
-      addgroup -S postfix 2>/dev/null
-      addgroup -S postdrop 2>/dev/null
-      adduser -S -H -h /var/spool/postfix -G postfix -g postfix postfix 2>/dev/null
-      addgroup postfix mail 2>/dev/null
-      adduser -S -H -h /var/mail/domains -s /sbin/nologin -G postdrop -g vmail vmail 2>/dev/null
 
       # Initialize variables for compile-time flags and auxiliary libraries
       ccargs="-DHAS_SHL_LOAD"
@@ -123,22 +132,15 @@ pipeline:
       ccargs="$ccargs -DHAS_LMDB $(pkg-config --cflags lmdb) -DDEF_DB_TYPE=\\\"lmdb\\\""
 
       # Fix build error with gcc 15.
-      # TODO: remove once postfix 3.11 released
       ccargs="$ccargs -std=gnu17"
 
       mkdir -p "${{targets.contextdir}}"/usr/bin
       mkdir -p "${{targets.contextdir}}"/etc/postfix
-      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/public
-      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/maildrop
-      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/pid
-      mkdir -p "${{targets.contextdir}}"/var/lib/postfix
-      mkdir -p "${{targets.contextdir}}"/var/mail/domains
       mkdir -p "${{targets.contextdir}}"/usr/share/man
       mkdir -p "${{targets.contextdir}}"/usr/share/man/man1
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/defaults
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/readme
       mkdir -p "${{targets.contextdir}}"/usr/share/licenses/postfix
-
 
       # compile
       make DEBUG="" \
@@ -173,10 +175,8 @@ pipeline:
       install -Dm644 man/man1/qshape.1 -t "${{targets.contextdir}}"/usr/share/man/man1
       install -Dm755 auxiliary/qshape/qshape.pl -t "${{targets.contextdir}}"/usr/bin
 
-      for i in postdrop postqueue; do
-         chgrp postdrop "${{targets.contextdir}}"/usr/bin/$i
-         chmod g+s "${{targets.contextdir}}"/usr/bin/$i
-      done
+      # Set setgid bit for postqueue and postdrop (ownership handled by image level)
+      chmod 2755 "${{targets.contextdir}}"/usr/bin/postqueue "${{targets.contextdir}}"/usr/bin/postdrop
 
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/defaults/ \
         "${{targets.contextdir}}"/usr/share/licenses/postfix/
@@ -185,20 +185,12 @@ pipeline:
       mv "${{targets.contextdir}}"/etc/postfix/*LICENSE* \
       	"${{targets.contextdir}}"/usr/share/licenses/postfix/
       install -Dm755 postfix.initd "${{targets.contextdir}}"/etc/init.d/postfix
-      chown postfix "${{targets.contextdir}}"/var/spool/postfix/* "${{targets.contextdir}}"/var/lib/postfix
-      chown root:postfix "${{targets.contextdir}}"/var/spool/postfix/pid
-      chgrp postdrop "${{targets.contextdir}}"/var/spool/postfix/maildrop \
-      	"${{targets.contextdir}}"/var/spool/postfix/public
 
       cd "${{targets.contextdir}}"/etc/postfix/
       for map in ldap mysql pcre pgsql sqlite; do
-      	echo "split $map"
       	_mvline "^\s*$map" "$map" dynamicmaps.cf
       done
       rm makedefs.out
-
-      # setgid bit for postqueue group when it exists
-      chmod 2755 ${{targets.contextdir}}/usr/bin/postqueue ${{targets.contextdir}}/usr/bin/postdrop
 
       # fix /etc/postfix/postfix-files so that "postfix set-permissions" can run
       sed -i \
@@ -209,6 +201,157 @@ pipeline:
       	-e '/config_directory\/TLS_LICENSE/d' \
       	-e '/config_directory\/[^/]\+\.cf\.default/d' \
       	"${{targets.contextdir}}"/etc/postfix/postfix-files
+
+  # Copy and customize upstream scripts and configs
+  - runs: |
+      # Copy scripts from upstream
+      mkdir -p "${{targets.contextdir}}"/scripts
+      cp -r scripts/* "${{targets.contextdir}}"/scripts/
+      chmod +x "${{targets.contextdir}}"/scripts/*.sh
+
+      # Copy configs from upstream
+      mkdir -p "${{targets.contextdir}}"/etc
+      cp -r configs/* "${{targets.contextdir}}"/etc/
+
+      # Customize scripts for Rspamd instead of OpenDKIM
+      cd "${{targets.contextdir}}"
+
+      # Update supervisord.conf to use Rspamd instead of OpenDKIM
+      sed -i 's/\[program:opendkim\]/\[program:rspamd\]/' etc/supervisord.conf
+      sed -i 's/command.*=.*\/scripts\/opendkim.sh/command         = \/scripts\/rspamd.sh/' etc/supervisord.conf
+      sed -i 's/user.*=.*opendkim/user            = _rspamd/' etc/supervisord.conf
+      sed -i 's/group.*=.*opendkim/group           = _rspamd/' etc/supervisord.conf
+
+      # Create Rspamd script (replacing opendkim.sh)
+      cat > scripts/rspamd.sh << 'EOF'
+      #!/bin/sh
+      set -e
+      exec /usr/bin/rspamd -c /etc/rspamd/rspamd.conf -f -u _rspamd -g _rspamd
+      EOF
+      chmod +x scripts/rspamd.sh
+
+      # Update healthcheck.sh to check Rspamd instead of OpenDKIM
+      sed -i 's/check_dkim/check_rspamd/' scripts/healthcheck.sh
+      sed -i 's/printf.*8891/printf "\\x18Clocalhost\\x004\\x00\\x00127.0.0.1\\x00" | nc -w 2 127.0.0.1 11332/' scripts/healthcheck.sh
+      sed -i 's/DKIM check/Rspamd check/' scripts/healthcheck.sh
+
+      # Update common-run.sh to replace OpenDKIM functions with Rspamd
+      sed -i 's/postfix_setup_dkim/postfix_setup_rspamd/' scripts/common-run.sh
+      sed -i 's/opendkim_custom_commands/rspamd_custom_commands/' scripts/common-run.sh
+
+      # Replace the OpenDKIM debugging function completely (same issue we hit before)
+      # Remove the old function and add the new one
+      sed -i '/postfix_setup_debugging()/,/^}/d' scripts/common-run.sh
+
+      # Add the new Rspamd-compatible debugging function
+      cat >> scripts/common-run.sh << 'EOF'
+
+      postfix_setup_debugging() {
+          if [ ! -z "$INBOUND_DEBUGGING" ]; then
+              notice "Enabling additional debugging for: ${emphasis}$POSTFIX_mynetworks${reset}, as INBOUND_DEBUGGING=''${INBOUND_DEBUGGING}''"
+              do_postconf -e "debug_peer_list=$POSTFIX_mynetworks"
+          else
+              info "Debugging is disabled."
+          fi
+      }
+      EOF
+
+      # Add Rspamd setup function to common-run.sh
+      cat >> scripts/common-run.sh << 'EOF'
+
+      postfix_setup_rspamd() {
+          local RSPAMD_ENABLED
+
+          if [ -d /etc/rspamd/local.d ] && [ ! -z "$(find /etc/rspamd/local.d -type f ! -name .)" ]; then
+              RSPAMD_ENABLED=", ${emphasis}rspamd${reset}"
+              notice "Configuring Rspamd."
+              mkdir -p /var/run/rspamd
+              chown -R _rspamd:_rspamd /var/run/rspamd
+
+              do_postconf -e "milter_protocol=6"
+              do_postconf -e "milter_default_action=accept"
+              do_postconf -e "smtpd_milters=inet:localhost:11332"
+              do_postconf -e "non_smtpd_milters=inet:localhost:11332"
+
+              # Note: Configuration files are created at package level
+              # No need to recreate them at runtime
+          else
+              info "No Rspamd configuration found, will not use Rspamd."
+              do_postconf -# smtpd_milters
+              do_postconf -# non_smtpd_milters
+          fi
+      }
+
+      rspamd_custom_commands() {
+          local setting
+          local key
+          local value
+          for setting in ${!RSPAMD_*}; do
+              key="${setting:7}"
+              value="${!setting}"
+              if [ -n "${value}" ]; then
+                  info "Applying custom Rspamd setting: ${emphasis}${key}=${value}${reset}"
+              else
+                  info "Deleting custom Rspamd setting: ${emphasis}${key}${reset}"
+              fi
+          done
+      }
+      EOF
+
+      # Update remaining OpenDKIM references
+      sed -i 's/DKIM_ENABLED/RSPAMD_ENABLED/' scripts/run.sh
+      sed -i 's/postfix_setup_dkim/postfix_setup_rspamd/g' scripts/run.sh
+      sed -i 's/opendkim_custom_commands/rspamd_custom_commands/g' scripts/run.sh
+
+      # Fix cron.sh flag
+      sed -i 's/crond -f -S/crond -f/' scripts/cron.sh
+
+      # Create configuration directories and files
+      mkdir -p "${{targets.contextdir}}"/etc/rspamd/local.d "${{targets.contextdir}}"/etc/postfix/main.cf.d
+
+      # Create Postfix milter configuration
+      cat > "${{targets.contextdir}}"/etc/postfix/main.cf.d/milter.conf << 'EOF'
+      # Milter configuration for rspamd integration
+      smtpd_milters = inet:localhost:11332
+      milter_default_action = accept
+      milter_protocol = 6
+      EOF
+
+      # Create Rspamd worker-proxy override for Postfix milter
+      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/worker-proxy.inc << 'EOF'
+      # Override worker-proxy for Postfix milter
+      bind_socket = "localhost:11332";
+      milter = true;
+      EOF
+
+      # Create DKIM signing configuration for Postfix mail server
+      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/dkim_signing.conf << 'EOF'
+      # Enable DKIM signing by setting the default key path
+      # This overrides the commented path in upstream dkim_signing.conf
+      path = "/var/lib/rspamd/dkim/$domain.$selector.key";
+
+      # Additional Postfix-specific DKIM settings
+      # Sign authenticated users (SMTP authentication)
+      sign_authenticated = true;
+
+      # Sign local network mail
+      sign_local = true;
+
+      # Don't sign inbound mail (only outbound)
+      sign_inbound = false;
+
+      # Use domain from email header for signing
+      use_domain = "header";
+
+      # Normalize domains to eSLD (e.g., sub.example.com -> example.com)
+      use_esld = true;
+
+      # Check if public key matches private key (recommended for production)
+      check_pubkey = true;
+
+      # Allow public key mismatch (for key rotation scenarios)
+      allow_pubkey_mismatch = true;
+      EOF
 
 subpackages:
   - name: postfix-doc
@@ -235,268 +378,6 @@ subpackages:
         - merged-usrsbin
         - wolfi-baselayout
 
-  - name: postfix-scripts
-    description: Postfix startup and health check scripts
-    dependencies:
-      runtime:
-        - merged-usrsbin
-        - wolfi-baselayout
-        - netcat-openbsd
-        - cronie
-        - bash
-        - grep
-        - coreutils
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/scripts
-          
-          # Create run.sh startup script
-          cat > "${{targets.subpkgdir}}"/scripts/run.sh << 'EOF'
-          #!/usr/bin/env bash
-          set -e
-          
-          chmod +x /scripts/*.sh
-          
-          announce_startup() {
-            echo "★★★★★ POSTFIX STARTING UP ★★★★★"
-          }
-          
-          announce_startup
-          
-          # Create necessary directories
-          mkdir -p /var/spool/postfix/pid /var/spool/postfix/dev /var/spool/postfix/private /var/spool/postfix/public
-          
-          # Set proper permissions
-          chown root: /var/spool/postfix/
-          chown root: /var/spool/postfix/pid
-          chown -R postfix:postdrop /var/spool/postfix/private
-          chown -R postfix:postdrop /var/spool/postfix/public
-          
-          # Setup postfix
-          postfix set-permissions > /dev/null 2>&1 || true
-          postmap lmdb:/etc/postfix/aliases
-          
-          # Configure rspamd integration for DKIM
-          mkdir -p /etc/rspamd/local.d
-          
-          if [ ! -f /etc/rspamd/local.d/dkim_signing.conf ]; then
-            cat > /etc/rspamd/local.d/dkim_signing.conf << 'DKIM_CONF'
-          # DKIM signing configuration
-          path = "/etc/rspamd/dkim/$domain.$selector.key";
-          selector = "mail";
-          allow_username_mismatch = true;
-          use_domain = "header";
-          use_esld = true;
-          sign_local = true;
-          sign_authenticated = true;
-          DKIM_CONF
-          fi
-          
-          # Ensure directories exist for DKIM keys
-          mkdir -p /etc/rspamd/dkim
-          
-          # Start services via supervisord
-          exec supervisord -c /etc/supervisord.conf
-          EOF
-          
-          # Create healthcheck.sh script
-          cat > "${{targets.subpkgdir}}"/scripts/healthcheck.sh << 'EOF'
-          #!/bin/sh
-          set -e
-          
-          check_postfix() {
-            printf "EHLO healthcheck\nquit\n" | \
-            { while read l ; do sleep 1; echo $l; done } | \
-            nc -w 2 127.0.0.1 587 | \
-            grep -qE "^220.*ESMTP Postfix"
-          }
-          
-          echo "Postfix check..."
-          check_postfix
-          echo "All OK!"
-          EOF
-          
-          # Create postfix.sh script
-          cat > "${{targets.subpkgdir}}"/scripts/postfix.sh << 'EOF'
-          #!/bin/sh
-          exec /usr/sbin/postfix -c /etc/postfix start-fg
-          EOF
-          
-          # Create cron.sh script
-          cat > "${{targets.subpkgdir}}"/scripts/cron.sh << 'EOF'
-          #!/bin/sh
-          exec /usr/sbin/crond -f -S
-          EOF
-          
-          chmod +x "${{targets.subpkgdir}}"/scripts/*.sh
-
-  # Note: postfix-config subpackage removed to avoid file conflicts
-  # - The supervisor package already provides /etc/supervisord.conf
-  # - The rsyslog package already provides /etc/rsyslog.conf
-  # - Only the opendkim.conf placeholder was unique to this package
-  # - To avoid conflicts, we'll rely on the official packages for these configs
-  # - name: postfix-config
-  #   description: Postfix configuration files
-  #   dependencies:
-  #     runtime:
-  #       - merged-usrsbin
-  #       - wolfi-baselayout
-  #       - bash
-  #       - supervisor
-  #       - rsyslog
-  #       - postfix
-  #       - cronie
-  #       - netcat-openbsd
-  #       - grep
-  #       - sed
-  #       - coreutils
-  #       - procps
-  #       - shadow
-  #       - findutils
-  #       - busybox
-  #       - ca-certificates-bundle
-  #       - tzdata
-  #       - glibc-locales
-  #       - libgcc
-  #   pipeline:
-  #     - runs: |
-  #         mkdir -p "${{targets.subpkgdir}}"/etc
-  #         mkdir -p "${{targets.subpkgdir}}"/etc/opendkim
-          
-  #         # Create supervisord.conf
-  #         cat > "${{targets.subpkgdir}}"/etc/supervisord.conf << 'EOF'
-  #         [supervisord]
-  #         user            = root
-  #         nodaemon        = true
-  #         logfile         = /dev/null
-  #         logfile_maxbytes= 0
-          
-  #         [program:rsyslog]
-  #         command         = rsyslogd -n
-  #         autostart       = true
-  #         autorestart     = true
-  #         startsecs       = 2
-  #         stopwaitsecs    = 2
-  #         stdout_logfile  = /dev/stdout
-  #         stderr_logfile  = /dev/stderr
-  #         stdout_logfile_maxbytes = 0
-  #         stderr_logfile_maxbytes = 0
-          
-  #         [program:postfix]
-  #         command         = /scripts/postfix.sh
-  #         autostart       = true
-  #         autorestart     = false
-  #         directory       = /etc/postfix
-  #         startsecs       = 0
-          
-  #         [program:cron]
-  #         command         = /scripts/cron.sh
-  #         autostart       = true
-  #         autorestart     = true
-  #         startsecs       = 0
-  #         EOF
-          
-  #         # Create rsyslog.conf
-  #         cat > "${{targets.subpkgdir}}"/etc/rsyslog.conf << 'EOF'
-  #         $ModLoad immark.so   # provides --MARK-- message capability
-  #         $ModLoad imuxsock.so # provides support for local system logging
-          
-  #         # default permissions for all log files.
-  #         $FileOwner root
-  #         $FileGroup adm
-  #         $FileCreateMode 0640
-  #         $DirCreateMode 0755
-  #         $Umask 0022
-          
-  #         template(name="devicelog" type="string" string="/dev/stdout")
-          
-  #         template(name="plain" type="list") {
-  #             property(name="timereported" dateFormat="rfc3339")
-  #             constant(value=" ")
-  #             property(name="syslogseverity-text" caseconversion="upper" fixedwidth="on" position.to="7")
-  #             constant(value=" ")
-  #             property(name="syslogtag")
-  #             property(name="msg" spifno1stsp="on")
-  #             property(name="msg" droplastlf="on")
-  #             constant(value="\n")
-  #         }
-          
-  #         if $syslogseverity <= '6' then {
-  #             # Do not log healthchecks
-  #             if ($msg contains_i "connect from localhost[127.0.0.1]") then { stop }
-  #             if ($msg contains_i "lost connection after EHLO from localhost[127.0.0.1]") then { stop }
-  #             if ($msg contains_i "disconnect from localhost[127.0.0.1] ehlo=1 commands=1") then { stop }
-  #         }
-          
-  #         action(name="stdout" type="omfile" DynaFile="devicelog" template="plain" DirCreateMode="0755" FileCreateMode="0644")
-  #         EOF
-          
-  #         # Create opendkim.conf (using rspamd instead)
-  #         cat > "${{targets.subpkgdir}}"/etc/opendkim/opendkim.conf << 'EOF'
-  #         # OpenDKIM configuration (using rspamd instead)
-  #         # This file is kept for compatibility with upstream
-  #         # Rspamd handles DKIM signing and verification
-  #         EOF
-
-  - name: postfix-rspamd-config
-    description: Rspamd configuration for Postfix DKIM signing
-    dependencies:
-      runtime:
-        - merged-usrsbin
-        - wolfi-baselayout
-        - rspamd
-        - bash
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/etc/opendkim
-          mkdir -p "${{targets.subpkgdir}}"/etc/rspamd/local.d
-          
-          # Create placeholder opendkim.conf for compatibility with upstream
-          cat > "${{targets.subpkgdir}}"/etc/opendkim/opendkim.conf << 'EOF'
-          # OpenDKIM configuration (using rspamd instead)
-          # This file is kept for compatibility with upstream
-          # Rspamd handles DKIM signing and verification
-          
-          # Settings from upstream that rspamd will handle:
-          AutoRestart             Yes
-          AutoRestartRate         10/1h
-          UMask                   002
-          Syslog                  Yes
-          SyslogSuccess           Yes
-          LogWhy                  No
-          
-          Canonicalization        relaxed/simple
-          RequireSafeKeys         no
-          
-          Mode                    sv
-          SignatureAlgorithm      rsa-sha256
-          EOF
-          
-          # Create rspamd DKIM signing configuration
-          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/dkim_signing.conf << 'EOF'
-          # DKIM signing configuration for use with Postfix
-          path = "/etc/rspamd/dkim/$domain.$selector.key";
-          selector = "mail";
-          allow_username_mismatch = true;
-          use_domain = "header";
-          use_esld = true;
-          sign_local = true;
-          sign_authenticated = true;
-          EOF
-          
-          # Create milter configuration for Postfix integration
-          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/milter_headers.conf << 'EOF'
-          # Add DKIM signature using the milter protocol
-          use = ["authentication-results", "x-spam-status"];
-          authenticated_headers = ["authentication-results"];
-          EOF
-          
-          # Create worker-proxy configuration for Postfix milter
-          cat > "${{targets.subpkgdir}}"/etc/rspamd/local.d/worker-proxy.inc << 'EOF'
-          bind_socket = "localhost:8891";
-          milter = true;
-          EOF
-
   - range: _subpackages
     name: postfix-${{range.key}}
     description: "${{range.key}} map support for postfix"
@@ -510,8 +391,6 @@ subpackages:
           mkdir -p "${{targets.contextdir}}"/usr/lib/postfix \
                  "${{targets.contextdir}}"/etc/postfix/dynamicmaps.cf.d
           m="${{range.key}}"
-          mkdir -p "${{targets.contextdir}}"/usr/lib/postfix \
-                 "${{targets.contextdir}}"/etc/postfix/dynamicmaps.cf.d
           mv "${{targets.destdir}}"/usr/lib/postfix/postfix-$m.so \
           	"${{targets.subpkgdir}}"/usr/lib/postfix/
           mv "${{targets.destdir}}"/etc/postfix/dynamicmaps.cf.d/$m \
@@ -522,8 +401,10 @@ subpackages:
 
 update:
   enabled: true
-  release-monitor:
-    identifier: 3693
+  github:
+    identifier: bokysan/docker-postfix
+    use-tag: true
+    strip-prefix: v
 
 test:
   pipeline:
@@ -560,10 +441,10 @@ test:
 
         LOG_FILE="/var/log/maillog"
         if [ -f "$LOG_FILE" ]; then
-                    echo "Checking Postfix logs for email delivery status..."
-                        grep "$(date +'%b %d')" $LOG_FILE | tail -n 10
-                else
-                            echo "Log file not found: $LOG_FILE"
+            echo "Checking Postfix logs for email delivery status..."
+            grep "$(date +'%b %d')" $LOG_FILE | tail -n 10
+        else
+            echo "Log file not found: $LOG_FILE"
         fi
 
         TO_EMAIL="localuser@localhost"
@@ -580,10 +461,10 @@ test:
         MAIL_QUEUE=$(mailq)
 
         if [ -z "$MAIL_QUEUE" ]; then
-                    echo "Postfix test successful: Mail queue is empty. Email was likely delivered."
-            else
-                        echo "Postfix test result: Mail queue is not empty. Here is the current queue:"
-                            echo "$MAIL_QUEUE"
+            echo "Postfix test successful: Mail queue is empty. Email was likely delivered."
+        else
+            echo "Postfix test result: Mail queue is not empty. Here is the current queue:"
+            echo "$MAIL_QUEUE"
         fi
 
         echo "Test complete."
