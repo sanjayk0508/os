@@ -7,7 +7,10 @@ package:
     - license: Apache-2.0
   dependencies:
     runtime:
+      - bash
       - ca-certificates-bundle
+      - coreutils
+      - findutils
       - glib
       - libarchive
       - libevent
@@ -18,13 +21,17 @@ package:
       - openssl
       - pcre2
       - sqlite-libs
+      - wolfi-baselayout
       - zlib
 
 environment:
   contents:
     packages:
+      - bash
       - build-base
       - busybox
+      - coreutils
+      - findutils
       - glib-dev
       - icu-dev
       - libarchive-dev
@@ -54,14 +61,33 @@ pipeline:
 
   - uses: cmake/install
 
-  - uses: strip
-
   - runs: |
-      # Create required directories with proper permissions
-      install -d -m 755 "${{targets.destdir}}"/etc/rspamd
+      # Copy configuration files from where cmake installed them to where we want them
+      mkdir -p "${{targets.destdir}}"/etc/rspamd
+
+      # Debug: Check what cmake installed
+      echo "=== Checking what cmake installed ==="
+      ls -la "${{targets.destdir}}"/usr/etc/rspamd/
+      echo "=== Copying main config ==="
+
+      # Copy main rspamd.conf to /etc/rspamd/
+      if [ -f "${{targets.destdir}}"/usr/etc/rspamd/rspamd.conf ]; then
+          echo "Found rspamd.conf installed by cmake, copying to /etc/rspamd/"
+          cp "${{targets.destdir}}"/usr/etc/rspamd/rspamd.conf "${{targets.destdir}}"/etc/rspamd/
+      else
+          echo "ERROR: rspamd.conf not found in cmake install output!"
+          exit 1
+      fi
+
+      # Set proper permissions
+      chmod 644 "${{targets.destdir}}"/etc/rspamd/rspamd.conf
+
+      # Create required directories
       install -d -m 755 "${{targets.destdir}}"/var/lib/rspamd
       install -d -m 755 "${{targets.destdir}}"/var/log/rspamd
       install -d -m 755 "${{targets.destdir}}"/run/rspamd
+
+  - uses: strip
 
 update:
   enabled: true
