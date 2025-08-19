@@ -383,7 +383,7 @@ subpackages:
     description: "${{range.key}} map support for postfix"
     dependencies:
       runtime:
-        - mariadb-connector-c-dev
+        - mariadb-11.8-dev
         - merged-usrsbin
         - wolfi-baselayout
     pipeline:
