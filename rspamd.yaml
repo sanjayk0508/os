@@ -66,8 +66,11 @@ pipeline:
   - runs: |
       mkdir -p "${{targets.destdir}}"/etc/rspamd
 
-      # Copy main rspamd.conf to /etc/rspamd/
-      cp "${{targets.destdir}}"/usr/etc/rspamd/rspamd.conf "${{targets.destdir}}"/etc/rspamd/
+      # Copy config files from /usr/etc/rspamd to /etc/rspamd as upstream
+      if [ -d "${{targets.destdir}}"/usr/etc/rspamd ]; then
+          cp -r "${{targets.destdir}}"/usr/etc/rspamd/* "${{targets.destdir}}"/etc/rspamd/
+          rm -rf "${{targets.destdir}}"/usr/etc/rspamd
+      fi
 
       # Set proper permissions
       chmod 644 "${{targets.destdir}}"/etc/rspamd/rspamd.conf
