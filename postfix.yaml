@@ -21,7 +21,7 @@ package:
       - merged-usrsbin
       - netcat-openbsd
       - postfix-supervisor-config
-      - rspamd@local
+      - rspamd
       - rsyslog
       - sasl-xoauth2
       - sed
@@ -31,12 +31,12 @@ package:
 
 environment:
   contents:
-    repositories:
-      - '@local /work/packages'
-      - https://packages.wolfi.dev/os
-    keyring:
-      - local-melange.rsa.pub
-      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    # repositories:
+    #   - '@local /work/packages'
+    #   - https://packages.wolfi.dev/os
+    # keyring:
+    #   - local-melange.rsa.pub
+    #   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
     packages:
       - build-base
       - busybox
@@ -55,7 +55,7 @@ environment:
       - pcre2-dev
       - perl
       - postgresql-dev
-      # - rspamd@local
+      - rspamd
       - rsyslog
       - sasl-xoauth2-dev
       - shadow
@@ -268,8 +268,12 @@ pipeline:
           if [ -d /etc/rspamd/local.d ] && [ ! -z "$(find /etc/rspamd/local.d -type f ! -name .)" ]; then
               RSPAMD_ENABLED=", ${emphasis}rspamd${reset}"
               notice "Configuring Rspamd."
-              mkdir -p /var/run/rspamd
-              chown -R _rspamd:_rspamd /var/run/rspamd
+
+              # Fix Rspamd permissions and ownership - handle everything in Postfix package
+              mkdir -p /var/log/rspamd /var/run/rspamd /var/lib/rspamd/dkim
+              chmod 775 /var/log/rspamd /var/run/rspamd /var/lib/rspamd
+              chmod 700 /var/lib/rspamd/dkim
+              chown -R _rspamd:_rspamd /var/log/rspamd /var/run/rspamd /var/lib/rspamd
 
               do_postconf -e "milter_protocol=6"
               do_postconf -e "milter_default_action=accept"
@@ -324,8 +328,12 @@ pipeline:
       EOF
 
       # Create Rspamd directories since we're using remote rspamd package
+      # Note: We handle permissions and ownership at runtime in postfix_setup_rspamd()
       mkdir -p "${{targets.contextdir}}"/etc/rspamd/local.d
       mkdir -p "${{targets.contextdir}}"/etc/rspamd/override.d
+
+      # Fix cron warnings: cron checks /etc/cron.d in log
+      mkdir -p "${{targets.contextdir}}"/etc/cron.d
 
       # Create Rspamd worker-proxy override for Postfix milter
       cat > "${{targets.contextdir}}"/etc/rspamd/local.d/worker-proxy.inc << 'EOF'
