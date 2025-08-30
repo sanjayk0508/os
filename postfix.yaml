@@ -1,6 +1,6 @@
 package:
   name: postfix
-  version: "4.4.0"
+  version: ${{vars.package_version}}
   epoch: 7
   description: Secure and fast drop-in replacement for Sendmail (MTA) with Rspamd integration
   copyright:
@@ -28,6 +28,27 @@ package:
       - shadow
       - supervisor
       - wolfi-baselayout
+
+# Dual-source package: scripts from GitHub (docker-postfix), source code from official Postfix tarball
+# Optimized build pipeline with parallel compilation, Melange built-in actions, and template-based configuration
+vars:
+  # Main package version (for git-checkout)
+  package_version: "4.4.0"
+  # Postfix source version (for fetch)
+  postfix_source_version: "3.10.4"
+  # Docker postfix commit hash
+  docker_postfix_commit: "5113756b0836cc27e928040b2aa9762e820dc71b"
+  # Rspamd configuration defaults
+  RSPAMD_BIND_HOST: "localhost"
+  RSPAMD_BIND_PORT: "11332"
+  RSPAMD_DKIM_PATH: "/var/lib/rspamd/dkim/$domain.$selector.key"
+  RSPAMD_SIGN_AUTHENTICATED: "true"
+  RSPAMD_SIGN_LOCAL: "true"
+  RSPAMD_SIGN_INBOUND: "false"
+  RSPAMD_USE_DOMAIN: "header"
+  RSPAMD_USE_ESLD: "true"
+  RSPAMD_CHECK_PUBKEY: "true"
+  RSPAMD_ALLOW_PUBKEY_MISMATCH: "true"
 
 environment:
   contents:
@@ -73,17 +94,19 @@ data:
 
 pipeline:
   # Get the upstream docker-postfix repository for scripts and configs
-  - uses: git-checkout
+  - name: "Get Docker scripts from GitHub"
+    uses: git-checkout
     with:
       repository: https://github.com/bokysan/docker-postfix
-      tag: v${{package.version}}
-      expected-commit: 5113756b0836cc27e928040b2aa9762e820dc71b
+      tag: v${{vars.package_version}}
+      expected-commit: ${{vars.docker_postfix_commit}}
 
   # Get Postfix source tarball (scripts come from GitHub, but source code only available via tarball)
-  - uses: fetch
+  - name: "Get Postfix source from official mirror"
+    uses: fetch
     with:
-      expected-sha256: e3cec05d91b6d2958ecd6ea9045faa35f79c5b0e228b975ace46ad2afe812053
-      uri: https://de.postfix.org/ftpmirror/official/postfix-3.10.3.tar.gz
+      expected-sha256: cfb66861fe8f964787ddaeab15f3ca3e7ef3de730f97171afc4a5eca338ca444
+      uri: https://de.postfix.org/ftpmirror/official/postfix-${{vars.postfix_source_version}}.tar.gz
 
   - runs: |
       _mvline() {
@@ -203,28 +226,20 @@ pipeline:
       	-e '/config_directory\/[^/]\+\.cf\.default/d' \
       	"${{targets.contextdir}}"/etc/postfix/postfix-files
 
-  # Copy and customize upstream scripts and configs
-  - runs: |
-      # Copy scripts from upstream
-      mkdir -p "${{targets.contextdir}}"/scripts
-      cp -r scripts/* "${{targets.contextdir}}"/scripts/
-      chmod +x "${{targets.contextdir}}"/scripts/*.sh
+  # Copy upstream scripts and configs efficiently
+  - name: "Copy upstream scripts and configs"
+    runs: |
+      # Copy scripts from upstream with permissions
+      install -Dm755 scripts/*.sh -t "${{targets.contextdir}}"/scripts/
 
-      # Copy configs from upstream (EXCEPT supervisord.conf - subpackage will handle it)
-      mkdir -p "${{targets.contextdir}}"/etc
-      for file in configs/*; do
-          if [ "$(basename "$file")" != "supervisord.conf" ]; then
-              cp "$file" "${{targets.contextdir}}"/etc/
-          fi
-      done
+      # Copy configs from upstream (except supervisord.conf - subpackage will handle it)
+      install -Dm644 configs/* -t "${{targets.contextdir}}"/etc/
+      rm -f "${{targets.contextdir}}"/etc/supervisord.conf
 
-      # Note: Upstream docker-postfix should provide main.cf and master.cf
-      # If they're missing, the build will fail and we'll know to investigate
-
-      # Customize scripts for Rspamd instead of OpenDKIM
+  # Customize scripts for Rspamd instead of OpenDKIM
+  - name: "Customize scripts for Rspamd integration"
+    runs: |
       cd "${{targets.contextdir}}"
-
-      # Note: supervisord.conf will be handled by the postfix-supervisor-config subpackage
 
       # Create Rspamd script (replacing opendkim.sh)
       cat > scripts/rspamd.sh << 'EOF'
@@ -234,14 +249,16 @@ pipeline:
       EOF
       chmod +x scripts/rspamd.sh
 
-      # Update healthcheck.sh to check Rspamd instead of OpenDKIM
-      sed -i 's/check_dkim/check_rspamd/' scripts/healthcheck.sh
-      sed -i 's/printf.*8891/printf "\\x18Clocalhost\\x004\\x00\\x00127.0.0.1\\x00" | nc -w 2 127.0.0.1 11332/' scripts/healthcheck.sh
-      sed -i 's/DKIM check/Rspamd check/' scripts/healthcheck.sh
+      # Update healthcheck.sh to check Rspamd instead of OpenDKIM (consolidated)
+      sed -i -e 's/check_dkim/check_rspamd/g' \
+             -e 's/printf.*8891/printf "\\x18Clocalhost\\x004\\x00\\x00127.0.0.1\\x00" | nc -w 2 127.0.0.1 11332/g' \
+             -e 's/DKIM check/Rspamd check/g' \
+             scripts/healthcheck.sh
 
-      # Update common-run.sh to replace OpenDKIM functions with Rspamd
-      sed -i 's/postfix_setup_dkim/postfix_setup_rspamd/' scripts/common-run.sh
-      sed -i 's/opendkim_custom_commands/rspamd_custom_commands/' scripts/common-run.sh
+      # Update common-run.sh to replace OpenDKIM functions with Rspamd (consolidated)
+      sed -i -e 's/postfix_setup_dkim/postfix_setup_rspamd/g' \
+             -e 's/opendkim_custom_commands/rspamd_custom_commands/g' \
+             scripts/common-run.sh
 
       # Replace the OpenDKIM debugging function completely
       sed -i '/postfix_setup_debugging()/,/^}/d' scripts/common-run.sh
@@ -305,10 +322,11 @@ pipeline:
       }
       EOF
 
-      # Update remaining OpenDKIM references
-      sed -i 's/DKIM_ENABLED/RSPAMD_ENABLED/' scripts/run.sh
-      sed -i 's/postfix_setup_dkim/postfix_setup_rspamd/g' scripts/run.sh
-      sed -i 's/opendkim_custom_commands/rspamd_custom_commands/g' scripts/run.sh
+      # Update remaining OpenDKIM references (consolidated)
+      sed -i -e 's/DKIM_ENABLED/RSPAMD_ENABLED/g' \
+             -e 's/postfix_setup_dkim/postfix_setup_rspamd/g' \
+             -e 's/opendkim_custom_commands/rspamd_custom_commands/g' \
+             scripts/run.sh
 
       # Update the startup message to reflect that supervisor will manage services
       sed -i 's/notice "Starting: ${emphasis}rsyslog${reset}, ${emphasis}crond${reset}, ${emphasis}postfix${reset}$RSPAMD_ENABLED"/notice "Services will be managed by supervisor: ${emphasis}rsyslog${reset}, ${emphasis}crond${reset}, ${emphasis}postfix${reset}$RSPAMD_ENABLED"/' scripts/run.sh
@@ -316,13 +334,16 @@ pipeline:
       # Fix cron.sh flag
       sed -i 's/crond -f -S/crond -f/' scripts/cron.sh
 
+  # Create configuration files using templates
+  - name: "Create Rspamd configuration files"
+    runs: |
       # Create Postfix-specific configuration directory
       mkdir -p "${{targets.contextdir}}"/etc/postfix/main.cf.d
 
-      # Create Postfix milter configuration
-      cat > "${{targets.contextdir}}"/etc/postfix/main.cf.d/milter.conf << 'EOF'
+      # Create Postfix milter configuration using template
+      cat > "${{targets.contextdir}}"/etc/postfix/main.cf.d/milter.conf << EOF
       # Milter configuration for rspamd integration
-      smtpd_milters = inet:localhost:11332
+      smtpd_milters = inet:${{vars.RSPAMD_BIND_HOST}}:${{vars.RSPAMD_BIND_PORT}}
       milter_default_action = accept
       milter_protocol = 6
       EOF
@@ -335,40 +356,40 @@ pipeline:
       # Fix cron warnings: cron checks /etc/cron.d in log
       mkdir -p "${{targets.contextdir}}"/etc/cron.d
 
-      # Create Rspamd worker-proxy override for Postfix milter
-      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/worker-proxy.inc << 'EOF'
+      # Create Rspamd worker-proxy override for Postfix milter using template
+      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/worker-proxy.inc << EOF
       # Override worker-proxy for Postfix milter
-      bind_socket = "localhost:11332";
+      bind_socket = "${{vars.RSPAMD_BIND_HOST}}:${{vars.RSPAMD_BIND_PORT}}";
       milter = true;
       EOF
 
-      # Create DKIM signing configuration for Postfix mail server
-      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/dkim_signing.conf << 'EOF'
+      # Create DKIM signing configuration for Postfix mail server using template
+      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/dkim_signing.conf << EOF
       # Enable DKIM signing by setting the default key path
       # This overrides the commented path in upstream dkim_signing.conf
-      path = "/var/lib/rspamd/dkim/$domain.$selector.key";
+      path = "${{vars.RSPAMD_DKIM_PATH}}";
 
       # Additional Postfix-specific DKIM settings
       # Sign authenticated users (SMTP authentication)
-      sign_authenticated = true;
+      sign_authenticated = ${{vars.RSPAMD_SIGN_AUTHENTICATED}};
 
       # Sign local network mail
-      sign_local = true;
+      sign_local = ${{vars.RSPAMD_SIGN_LOCAL}};
 
       # Don't sign inbound mail (only outbound)
-      sign_inbound = false;
+      sign_inbound = ${{vars.RSPAMD_SIGN_INBOUND}};
 
       # Use domain from email header for signing
-      use_domain = "header";
+      use_domain = "${{vars.RSPAMD_USE_DOMAIN}}";
 
       # Normalize domains to eSLD (e.g., sub.example.com -> example.com)
-      use_esld = true;
+      use_esld = ${{vars.RSPAMD_USE_ESLD}};
 
       # Check if public key matches private key (recommended for production)
-      check_pubkey = true;
+      check_pubkey = ${{vars.RSPAMD_CHECK_PUBKEY}};
 
       # Allow public key mismatch (for key rotation scenarios)
-      allow_pubkey_mismatch = true;
+      allow_pubkey_mismatch = ${{vars.RSPAMD_ALLOW_PUBKEY_MISMATCH}};
       EOF
 
 subpackages:
@@ -384,14 +405,15 @@ subpackages:
         - wolfi-baselayout
     pipeline:
       - runs: |
+          # Create directory and copy supervisord.conf for this subpackage
           mkdir -p "${{targets.subpkgdir}}"/etc
-          # Copy and modify supervisord.conf for this subpackage
-          cp configs/supervisord.conf "${{targets.subpkgdir}}"/etc/
+          install -m644 configs/supervisord.conf "${{targets.subpkgdir}}"/etc/
 
-          # Modify the supervisord.conf to replace opendkim with rspamd
-          sed -i 's/\[program:opendkim\]/\[program:rspamd\]/' "${{targets.subpkgdir}}"/etc/supervisord.conf
-          sed -i 's/command.*=.*opendkim.sh/command         = \/scripts\/rspamd.sh/' "${{targets.subpkgdir}}"/etc/supervisord.conf
-          sed -i 's/user.*=.*opendkim/user            = _rspamd/' "${{targets.subpkgdir}}"/etc/supervisord.conf
+          # Modify the supervisord.conf to replace opendkim with rspamd (consolidated)
+          sed -i -e 's/\[program:opendkim\]/\[program:rspamd\]/' \
+                 -e 's/command.*=.*opendkim.sh/command         = \/scripts\/rspamd.sh/' \
+                 -e 's/user.*=.*opendkim/user            = _rspamd/' \
+                 "${{targets.subpkgdir}}"/etc/supervisord.conf
 
   - name: postfix-doc
     pipeline:
