@@ -10,22 +10,12 @@ package:
       - setuidgid
   dependencies:
     runtime:
-      - bash
       - busybox
-      - coreutils
       - cronie
-      - findutils
-      - glibc
-      - grep
-      - krb5-libs
       - merged-usrsbin
-      - netcat-openbsd
-      - postfix-supervisor-config
       - rspamd
       - rsyslog
       - sasl-xoauth2
-      - sed
-      - shadow
       - supervisor
       - wolfi-baselayout
 
@@ -38,26 +28,9 @@ vars:
   postfix_source_version: "3.10.4"
   # Docker postfix commit hash
   docker_postfix_commit: "5113756b0836cc27e928040b2aa9762e820dc71b"
-  # Rspamd configuration defaults
-  RSPAMD_BIND_HOST: "localhost"
-  RSPAMD_BIND_PORT: "11332"
-  RSPAMD_DKIM_PATH: "/var/lib/rspamd/dkim/$domain.$selector.key"
-  RSPAMD_SIGN_AUTHENTICATED: "true"
-  RSPAMD_SIGN_LOCAL: "true"
-  RSPAMD_SIGN_INBOUND: "false"
-  RSPAMD_USE_DOMAIN: "header"
-  RSPAMD_USE_ESLD: "true"
-  RSPAMD_CHECK_PUBKEY: "true"
-  RSPAMD_ALLOW_PUBKEY_MISMATCH: "true"
 
 environment:
   contents:
-    # repositories:
-    #   - '@local /work/packages'
-    #   - https://packages.wolfi.dev/os
-    # keyring:
-    #   - local-melange.rsa.pub
-    #   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
     packages:
       - build-base
       - busybox
@@ -65,7 +38,6 @@ environment:
       - coreutils
       - cyrus-sasl-dev
       - icu-dev
-      - krb5-dev
       - libnsl-dev
       - linux-headers
       - lmdb-dev
@@ -77,11 +49,8 @@ environment:
       - perl
       - postgresql-dev
       - rspamd
-      - rsyslog
       - sasl-xoauth2-dev
-      - shadow
       - sqlite-dev
-      # - supervisor
 
 data:
   - name: _subpackages
@@ -160,6 +129,11 @@ pipeline:
 
       mkdir -p "${{targets.contextdir}}"/usr/bin
       mkdir -p "${{targets.contextdir}}"/etc/postfix
+      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/public
+      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/maildrop
+      mkdir -p "${{targets.contextdir}}"/var/spool/postfix/pid
+      mkdir -p "${{targets.contextdir}}"/var/lib/postfix
+      mkdir -p "${{targets.contextdir}}"/var/mail/domains
       mkdir -p "${{targets.contextdir}}"/usr/share/man
       mkdir -p "${{targets.contextdir}}"/usr/share/man/man1
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/defaults
@@ -199,8 +173,11 @@ pipeline:
       install -Dm644 man/man1/qshape.1 -t "${{targets.contextdir}}"/usr/share/man/man1
       install -Dm755 auxiliary/qshape/qshape.pl -t "${{targets.contextdir}}"/usr/bin
 
-      # Set setgid bit for postqueue and postdrop (ownership handled by image level)
-      chmod 2755 "${{targets.contextdir}}"/usr/bin/postqueue "${{targets.contextdir}}"/usr/bin/postdrop
+      # Set setgid bit for postqueue and postdrop (users/groups handled by image config)
+      for i in postdrop postqueue; do
+         chgrp 1001 "${{targets.contextdir}}"/usr/bin/$i  # Use numeric GID since groups don't exist during build
+         chmod g+s "${{targets.contextdir}}"/usr/bin/$i
+      done
 
       mkdir -p "${{targets.contextdir}}"/usr/share/doc/postfix/defaults/ \
         "${{targets.contextdir}}"/usr/share/licenses/postfix/
@@ -210,8 +187,11 @@ pipeline:
       	"${{targets.contextdir}}"/usr/share/licenses/postfix/
       install -Dm755 postfix.initd "${{targets.contextdir}}"/etc/init.d/postfix
 
+      # Note: Directory ownership is handled by image config paths
+      # Package only creates directories, image config sets ownership
+
       cd "${{targets.contextdir}}"/etc/postfix/
-      for map in ldap mysql pcre pgsql sqlite; do
+      for map in ldap mysql pcre pgsql sqlite lmdb; do
       	_mvline "^\s*$map" "$map" dynamicmaps.cf
       done
       rm makedefs.out
@@ -343,9 +323,13 @@ pipeline:
       # Create Postfix milter configuration using template
       cat > "${{targets.contextdir}}"/etc/postfix/main.cf.d/milter.conf << EOF
       # Milter configuration for rspamd integration
+      # Inbound mail scanning (for spam filtering)
       smtpd_milters = inet:${{vars.RSPAMD_BIND_HOST}}:${{vars.RSPAMD_BIND_PORT}}
       milter_default_action = accept
       milter_protocol = 6
+
+      # Outbound mail scanning (REQUIRED for DKIM signing)
+      non_smtpd_milters = inet:${{vars.RSPAMD_BIND_HOST}}:${{vars.RSPAMD_BIND_PORT}}
       EOF
 
       # Create Rspamd directories since we're using remote rspamd package
@@ -359,41 +343,45 @@ pipeline:
       # Create Rspamd worker-proxy override for Postfix milter using template
       cat > "${{targets.contextdir}}"/etc/rspamd/local.d/worker-proxy.inc << EOF
       # Override worker-proxy for Postfix milter
-      bind_socket = "${{vars.RSPAMD_BIND_HOST}}:${{vars.RSPAMD_BIND_PORT}}";
+      bind_socket = "localhost:11332";
       milter = true;
       EOF
 
-      # Create DKIM signing configuration for Postfix mail server using template
+      # Create DKIM signing configuration for Postfix-specific settings
+      # This will override the base Rspamd configuration without conflicts
       cat > "${{targets.contextdir}}"/etc/rspamd/local.d/dkim_signing.conf << EOF
-      # Enable DKIM signing by setting the default key path
-      # This overrides the commented path in upstream dkim_signing.conf
-      path = "${{vars.RSPAMD_DKIM_PATH}}";
+      # Postfix-specific DKIM signing overrides
+      # Note: DKIM signing requires outbound mail scanning via non_smtpd_milters
 
-      # Additional Postfix-specific DKIM settings
+      # CRITICAL: Enable DKIM signing by uncommenting the path and selector
+      # This overrides the commented-out lines in the upstream config
+      path = "/var/lib/rspamd/dkim/\$domain.\$selector.key";
+      selector = "default";
+
       # Sign authenticated users (SMTP authentication)
-      sign_authenticated = ${{vars.RSPAMD_SIGN_AUTHENTICATED}};
+      sign_authenticated = true;
 
       # Sign local network mail
-      sign_local = ${{vars.RSPAMD_SIGN_LOCAL}};
+      sign_local = true;
 
       # Don't sign inbound mail (only outbound)
-      sign_inbound = ${{vars.RSPAMD_SIGN_INBOUND}};
+      sign_inbound = false;
 
       # Use domain from email header for signing
-      use_domain = "${{vars.RSPAMD_USE_DOMAIN}}";
+      use_domain = "header";
 
       # Normalize domains to eSLD (e.g., sub.example.com -> example.com)
-      use_esld = ${{vars.RSPAMD_USE_ESLD}};
+      use_esld = true;
 
       # Check if public key matches private key (recommended for production)
-      check_pubkey = ${{vars.RSPAMD_CHECK_PUBKEY}};
+      check_pubkey = true;
 
       # Allow public key mismatch (for key rotation scenarios)
-      allow_pubkey_mismatch = ${{vars.RSPAMD_ALLOW_PUBKEY_MISMATCH}};
+      allow_pubkey_mismatch = true;
       EOF
 
 subpackages:
-  - name: postfix-supervisor-config
+  - name: ${{package.name}}-supervisor-config
     description: Supervisor configuration for Postfix with Rspamd integration
     dependencies:
       replaces:
