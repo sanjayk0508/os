@@ -67,6 +67,11 @@ pipeline:
       tag: v${{vars.package_version}}
       expected-commit: ${{vars.docker_postfix_commit}}
 
+  - uses: patch
+    with:
+      patches: |
+        0001-migrate-to-rspamd.patch
+
   # Get source tarball (source code only available via tarball)
   - uses: fetch
     with:
@@ -225,88 +230,12 @@ pipeline:
       EOF
       chmod +x scripts/rspamd.sh
 
-      # Update healthcheck.sh to check rspamd instead of opendkim (consolidated)
+      # patch only stable files to avoid upstream drift issues
+      # update healthcheck.sh to check rspamd instead of opendkim (consolidated)
       sed -i -e 's/check_dkim/check_rspamd/g' \
              -e 's/printf.*8891/printf "\\x18Clocalhost\\x004\\x00\\x00127.0.0.1\\x00" | nc -w 2 127.0.0.1 11332/g' \
              -e 's/DKIM check/Rspamd check/g' \
              scripts/healthcheck.sh
-
-      # Update common-run.sh to replace opendkim functions with Rspamd (consolidated)
-      sed -i -e 's/postfix_setup_dkim/postfix_setup_rspamd/g' \
-             -e 's/opendkim_custom_commands/rspamd_custom_commands/g' \
-             scripts/common-run.sh
-
-      # Replace the opendkim debugging function
-      sed -i '/postfix_setup_debugging()/,/^}/d' scripts/common-run.sh
-
-      # Add the new debugging function
-      cat >> scripts/common-run.sh << 'EOF'
-
-      postfix_setup_debugging() {
-          if [ ! -z "$INBOUND_DEBUGGING" ]; then
-              notice "Enabling additional debugging for: ${emphasis}$POSTFIX_mynetworks${reset}, as INBOUND_DEBUGGING=''${INBOUND_DEBUGGING}''"
-              do_postconf -e "debug_peer_list=$POSTFIX_mynetworks"
-          else
-              info "Debugging is disabled."
-          fi
-      }
-      EOF
-
-      # rspamd setup function to common-run.sh
-      cat >> scripts/common-run.sh << 'EOF'
-
-      postfix_setup_rspamd() {
-          local RSPAMD_ENABLED
-
-          if [ -d /etc/rspamd/local.d ] && [ ! -z "$(find /etc/rspamd/local.d -type f ! -name .)" ]; then
-              RSPAMD_ENABLED=", ${emphasis}rspamd${reset}"
-              notice "Configuring Rspamd."
-
-              # Fix rspamd permissions and ownership - handle it in package to override base package
-              mkdir -p /var/log/rspamd /var/run/rspamd /var/lib/rspamd/dkim
-              chmod 775 /var/log/rspamd /var/run/rspamd /var/lib/rspamd
-              chmod 700 /var/lib/rspamd/dkim
-              chown -R _rspamd:_rspamd /var/log/rspamd /var/run/rspamd /var/lib/rspamd
-
-              do_postconf -e "milter_protocol=6"
-              do_postconf -e "milter_default_action=accept"
-              do_postconf -e "smtpd_milters=inet:localhost:11332"
-              do_postconf -e "non_smtpd_milters=inet:localhost:11332"
-
-          else
-              info "No Rspamd configuration found, will not use Rspamd."
-              do_postconf -# smtpd_milters
-              do_postconf -# non_smtpd_milters
-          fi
-      }
-
-      rspamd_custom_commands() {
-          local setting
-          local key
-          local value
-
-          for setting in ${!RSPAMD_*}; do
-              key="${setting:7}"
-              value="${!setting}"
-
-              if [ -n "${value}" ]; then
-                  info "Applying custom Rspamd setting: ${emphasis}${key}=${value}${reset}"
-
-                  # append to dkim_signing.conf
-                  if [[ "$key" == *"dkim"* ]]; then
-                      echo "${key} = ${value};" >> /etc/rspamd/local.d/dkim_signing.conf
-                  fi
-              fi
-          done
-      }
-      EOF
-
-      sed -i -e 's/DKIM_ENABLED/RSPAMD_ENABLED/g' \
-             -e 's/postfix_setup_dkim/postfix_setup_rspamd/g' \
-             -e 's/opendkim_custom_commands/rspamd_custom_commands/g' \
-             scripts/run.sh
-
-      sed -i 's/notice "Starting: ${emphasis}rsyslog${reset}, ${emphasis}crond${reset}, ${emphasis}postfix${reset}$RSPAMD_ENABLED"/notice "Services will be managed by supervisor: ${emphasis}rsyslog${reset}, ${emphasis}crond${reset}, ${emphasis}postfix${reset}$RSPAMD_ENABLED"/' scripts/run.sh
 
       # Fix cron.sh flag
       sed -i 's/crond -f -S/crond -f/' scripts/cron.sh
@@ -323,7 +252,6 @@ pipeline:
 
       # handle permissions and ownership at runtime in postfix_setup_rspamd()
       mkdir -p "${{targets.contextdir}}"/etc/rspamd/local.d
-      mkdir -p "${{targets.contextdir}}"/etc/rspamd/override.d
 
       # Fix cron warnings, cron checks /etc/cron.d in log
       mkdir -p "${{targets.contextdir}}"/etc/cron.d
@@ -363,7 +291,7 @@ pipeline:
 
 subpackages:
   - name: ${{package.name}}-compat
-    description: "Compatibility package for upstream binary locations"
+    description: "Compatibility package for postfix"
     pipeline:
       - runs: |
           mkdir -p "${{targets.contextdir}}"/usr/sbin
@@ -390,7 +318,6 @@ subpackages:
             - ${{package.name}}
       pipeline:
         - runs: |
-            # Check that symlinks exist and point to correct targets
             test "$(readlink /usr/sbin/postfix)" = "/usr/bin/postfix"
             test "$(readlink /usr/sbin/sendmail)" = "/usr/bin/sendmail"
             test "$(readlink /usr/sbin/postconf)" = "/usr/bin/postconf"
